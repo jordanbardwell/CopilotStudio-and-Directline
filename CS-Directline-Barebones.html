@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en-US">
+  <head>
+    <title>Web Chat: Full-featured bundle</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script crossorigin="anonymous" src="https://cdn.botframework.com/botframework-webchat/latest/webchat.js"></script>
+    <style>
+      html,
+      body {
+        height: 100%;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      #webchat {
+        height: 100%;
+        width: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="webchat" role="main"></div>
+    <script>
+(async function() {
+    const res = await fetch('https://<your-azure-apim>.azure-api.net/api/directline/token', { method: 'GET' });
+    const { token } = await res.json();
+
+    const store = window.WebChat.createStore({}, ({ dispatch }) => next => action => {
+        console.log('Action received:', action);
+
+        // Listen for the direct line connection to be fulfilled, then triggers conversation start topic
+        if (action.type === 'DIRECT_LINE/CONNECT_FULFILLED') {
+            console.log('Direct line connected successfully');
+            dispatch({
+                type: 'DIRECT_LINE/POST_ACTIVITY',
+                meta: { method: 'keyboard' },
+                payload: {
+                    activity: {
+                        type: 'event',
+                        name: "startConversation",
+                        from: { id: 'user' }
+                    }
+                }
+            });
+        }
+
+        return next(action);
+    });
+
+    window.WebChat.renderWebChat(
+      {
+        directLine: window.WebChat.createDirectLine({ token }),
+        store
+      },
+      document.getElementById('webchat')
+    );
+
+    document.querySelector('#webchat > *').focus();
+})().catch(err => console.error(err));
+    </script>
+  </body>
+</html>
