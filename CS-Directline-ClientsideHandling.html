@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en-US">
+
+<head>
+  <title>Web Chat: Handoff Debugging Mode</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script crossorigin="anonymous"
+    src="https://cdn.botframework.com/botframework-webchat/latest/webchat.js"></script>
+  <style>
+    html,
+    body {
+      background-color: #f7f7f7;
+      height: 100%;
+    }
+
+    body {
+      margin: 0;
+    }
+
+    #webchat {
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.05);
+      height: 100%;
+      margin: auto;
+      max-width: 480px;
+      min-width: 360px;
+    }
+  </style>
+
+</head>
+
+<body>
+  <div id="webchat" role="main"></div>
+  <script>
+    (async function () {
+      // Fetch the Direct Line token
+      const res = await fetch('https://<your-azure-apim>.azurewebsites.net/api/directline/token', {
+        method: 'GET'
+      });
+      const { token } = await res.json();
+
+      // Initialize state variables for handoff mode
+      let handoffMode = false;
+      let conversationId = null;
+      let ExternalChatbotConversationId = null;
+
+// Create the Web Chat store with middleware
+const store = window.WebChat.createStore({}, ({ dispatch }) => next => action => {
+
+console.log('Action received:', action);
+
+// Drop WEB_CHAT/SET_SUGGESTED_ACTIONS with empty suggestedActions
+if (action.type === 'WEB_CHAT/SET_SUGGESTED_ACTIONS' && action.payload.suggestedActions.length === 0 && handoffMode) {
+  console.log('Dropping empty suggested actions.');
+  return; // Stop further processing of this event
+}
+
+// Drop DIRECT_LINE/INCOMING_ACTIVITY with type "typing"
+if (action.type === 'DIRECT_LINE/INCOMING_ACTIVITY' && action.payload.activity.type === 'typing' && handoffMode) {
+  console.log('Dropping typing activity.');
+  return; // Stop further processing of this event
+}
+
+// Listen for Direct Line connection events
+if (action.type === 'DIRECT_LINE/CONNECT_FULFILLED') {
+  console.log('Direct Line connection established.');
+  dispatch({
+    type: 'WEB_CHAT/SEND_EVENT',
+    payload: {
+      name: 'webchat/join',
+      value: { language: window.navigator.language }
+    }
+  });
+}
+
+// Listen for incoming activities to detect the handoff activity and custom event activities
+if (action.type === 'DIRECT_LINE/INCOMING_ACTIVITY') {
+  const { activity } = action.payload;
+
+  console.log('Incoming activity:', activity);
+
+  // Detect the 'handoff' activity
+  if (activity.type === 'handoff') {
+    console.log('Handoff activity detected:', activity);
+
+    // Enable handoff mode and store the conversation ID for forwarding
+    handoffMode = true;
+    conversationId = activity.conversation.id;
+    console.log('Handoff Mode Activated: Conversation ID:', conversationId);
+
+    // Inform the user that they are being connected to a live agent
+    dispatch({
+      type: 'DIRECT_LINE/INCOMING_ACTIVITY',
+      payload: {
+        activity: {
+          type: 'message',
+          id: Math.random().toString(36).substr(2, 9),
+          timestamp: new Date().toISOString(),
+          from: { id: 'bot', role: 'bot' },
+          text: "Okay, I'll connect you to a live agent.",
+        }
+      }
+    });
+
+    // Show typing indicator
+    dispatch({
+      type: 'WEB_CHAT/SET_SEND_BOX',
+      payload: { text: '' }
+    });
+
+    dispatch({
+      type: 'DIRECT_LINE/INCOMING_ACTIVITY',
+      payload: {
+        activity: {
+          type: 'typing',
+          from: { id: 'bot', role: 'bot' }
+        }
+      }
+    });
+
+    // Make the call to initiate the handoff to your middleware
+    fetch('https://<your-azure-apim>.azurewebsites.net/api/handoff', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        // Send your body here to your middleware for handoff. It could contain your Directline Conversation ID, and whatever else you need to send.
+        DirectLineConversationId: conversationId
+      })
+    })
+      .then(response => {
+        if (response.ok) {
+          console.log('Handoff initiation successful.');
+          // Stop typing indicator
+          dispatch({
+            type: 'DIRECT_LINE/INCOMING_ACTIVITY',
+            payload: {
+              activity: {
+                type: 'typing',
+                from: { id: 'bot', role: 'bot' },
+                timestamp: new Date().toISOString(),
+                id: Math.random().toString(36).substr(2, 9),
+                channelData: { typing: false }
+              }
+            }
+          });
+
+          // Inform the user that they are now connected
+          dispatch({
+            type: 'DIRECT_LINE/INCOMING_ACTIVITY',
+            payload: {
+              activity: {
+                type: 'message',
+                id: Math.random().toString(36).substr(2, 9),
+                timestamp: new Date().toISOString(),
+                from: { id: 'bot', role: 'bot' },
+                text: "You're now connected. An agent should be with you shortly.",
+              }
+            }
+          });
+          return response.json(); // Parse the JSON response
+        } else {
+          throw new Error('Network response was not ok.');
+        }
+      })
+      .then(data => {
+        console.log('Handoff Response Data:', data); // Log the parsed response data
+        ExternalChatbotConversationId = data.ExternalChatbotConversationId;
+        console.log('External Chatbot Conversation ID:', ExternalChatbotConversationId);
+        // You can now use ExternalChatbotConversationId as needed
+      })
+      .catch(error => {
+        console.error('Error:', error);
+      });
+
+    return; // Stop further processing of this event
+  }
+
+  // Detect the 'ExternalChatbotEndedConversation' activity
+  if (activity.type === 'event' && activity.name === 'ExternalChatbotEndedConversation') {
+    // Disable HandoffMode
+    handoffMode = false;
+    console.log('Handoff Mode disabled');
+    // Inform the user that the have been disconnected from the live agent
+    dispatch({
+      type: 'DIRECT_LINE/INCOMING_ACTIVITY',
+      payload: {
+        activity: {
+          type: 'message',
+          id: Math.random().toString(36).substr(2, 9),
+          timestamp: new Date().toISOString(),
+          from: { id: 'bot', role: 'bot' },
+          text: "The agent has ended the conversation.",
+        }
+      }
+    });
+  }
+}
+
+// Intercept the message before it reaches Direct Line
+if (action.type === 'DIRECT_LINE/POST_ACTIVITY' && handoffMode) {
+  const { activity } = action.payload;
+  const userMessage = activity.text;
+
+  console.log('Intercepted POST_ACTIVITY during handoff mode:', userMessage);
+
+  // Block the message from being sent to Direct Line (stop here)
+  console.log('Blocking message from reaching the bot during handoff mode.');
+
+  // Display the message in the Web Chat UI
+  if (!activity.from || activity.from.id !== 'user') {
+    dispatch({
+      type: 'WEB_CHAT/SET_SEND_BOX',
+      payload: { text: '' }
+    });
+
+    dispatch({
+      type: 'DIRECT_LINE/INCOMING_ACTIVITY',
+      payload: {
+        activity: {
+          type: 'message',
+          id: Math.random().toString(36).substr(2, 9),
+          timestamp: new Date().toISOString(),
+          from: { id: 'user', role: 'user' },
+          text: userMessage,
+          channelData: activity.channelData || {}  // Preserve channel data
+        }
+      }
+    });
+
+    console.log('Message displayed locally in Web Chat UI.');
+  }
+
+  // Forward the message to your External Chatbot through your middleware
+  fetch('https://<your-azure-apim>.azurewebsites.net/api/pushMessage/externalChatbot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      // Example Body Payload
+      conversationId: ExternalChatbotConversationId,
+      message: userMessage,
+    })
+  })
+    .then(response => {
+      if (response.ok) {
+        console.log('Message forwarded to external chatbot successfully.');
+      } else {
+        console.error('Error forwarding message to external chatbot:', response);
+      }
+    })
+    .catch(err => {
+      console.error('Network error forwarding message to external chatbot:', err);
+    });
+
+  // Do not allow the message to proceed further (block it from reaching Direct Line)
+  return;  // Block message from bot
+}
+
+// Let all other actions continue as usual
+return next(action);
+});
+
+// Render the Web Chat interface
+window.WebChat.renderWebChat({
+directLine: window.WebChat.createDirectLine({ token }),
+store
+}, document.getElementById('webchat'));
+
+document.querySelector('#webchat > *').focus();
+})().catch(err => console.error('Initialization error:', err));
+</script>
+</body>
+
+</html>
